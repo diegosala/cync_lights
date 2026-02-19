@@ -36,6 +36,7 @@ class CyncHub:
         self.writer = None
         self.login_code = bytearray(user_data['cync_credentials'])
         self.logged_in = False
+        self.user_data = user_data  # Store for potential config refresh
         self.home_devices = user_data['cync_config']['home_devices']
         self.home_controllers = user_data['cync_config']['home_controllers']
         self.switchID_to_homeID = user_data['cync_config']['switchID_to_homeID']
@@ -52,6 +53,7 @@ class CyncHub:
         self._seq_num = 0
         self._seq_num_lock = threading.Lock()
         self.pending_commands = {}
+        self.out_of_bounds_count = {home_id: 0 for home_id in self.home_controllers.keys()}  # Track topology mismatches
         [room.initialize() for room in self.cync_rooms.values() if room.is_subgroup]
         [room.initialize() for room in self.cync_rooms.values() if not room.is_subgroup]
 
@@ -157,6 +159,7 @@ class CyncHub:
                                         self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
                                 else:
                                     _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
+                                    self._record_topology_mismatch(home_id)
                             elif packet_length >= 25 and int(packet[13]) == 84:
                                 device_idx = int(packet[16])
                                 if device_idx < len(self.home_devices[home_id]):
@@ -170,6 +173,7 @@ class CyncHub:
                                         self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
                                 else:
                                     _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
+                                    self._record_topology_mismatch(home_id)
                             elif packet_length > 51 and int(packet[13]) == 82:
                                 switch_id = str(struct.unpack(">I", packet[0:4])[0])
                                 home_id = self.switchID_to_homeID[switch_id]
@@ -188,12 +192,18 @@ class CyncHub:
                                                         state = int((int(packet[12]) >> i) & int(packet[8])) > 0
                                                         brightness = 100 if state else 0
                                                         self.cync_switches[device_id].update_switch(state, brightness, self.cync_switches[device_id].color_temp, self.cync_switches[device_id].rgb)
+                                                    else:
+                                                        _LOGGER.warning(f"Multi-element device index {multi_idx} out of range for home {home_id}")
+                                                        self._record_topology_mismatch(home_id)
                                             else:
                                                 state = int(packet[8]) > 0
                                                 brightness = int(packet[12]) if state else 0
                                                 color_temp = int(packet[16])
                                                 rgb = {'r': int(packet[20]), 'g': int(packet[21]), 'b': int(packet[22]), 'active': int(packet[16]) == 254}
                                                 self.cync_switches[deviceID].update_switch(state, brightness, color_temp, rgb)
+                                    else:
+                                        _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
+                                        self._record_topology_mismatch(home_id)
                                     packet = packet[24:]
                         elif packet_type == 131:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
@@ -209,6 +219,7 @@ class CyncHub:
                                         self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
                                 else:
                                     _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
+                                    self._record_topology_mismatch(home_id)
                             elif packet_length >= 25 and int(packet[13]) == 84:
                                 device_idx = int(packet[16])
                                 if device_idx < len(self.home_devices[home_id]):
@@ -221,6 +232,7 @@ class CyncHub:
                                         self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
                                 else:
                                     _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
+                                    self._record_topology_mismatch(home_id)
                         elif packet_type == 67 and packet_length >= 26 and int(packet[4]) == 1 and int(packet[5]) == 1 and int(packet[6]) == 6:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
                             home_id = self.switchID_to_homeID[switch_id]
@@ -248,6 +260,7 @@ class CyncHub:
                                             self.cync_switches[deviceID].update_switch(state, brightness, color_temp, rgb)
                                 else:
                                     _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
+                                    self._record_topology_mismatch(home_id)
                                 packet = packet[19:]
                         elif packet_type == 171:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
@@ -285,6 +298,13 @@ class CyncHub:
                         dev.update_controllers()
                     for room in self.cync_rooms.values():
                         room.update_controllers()
+
+    def _record_topology_mismatch(self, home_id):
+        """Track out-of-bounds device indices to detect topology changes."""
+        self.out_of_bounds_count[home_id] = self.out_of_bounds_count.get(home_id, 0) + 1
+        if self.out_of_bounds_count[home_id] >= 3:
+            _LOGGER.warning(f"Topology mismatch detected for home {home_id} ({self.out_of_bounds_count[home_id]} out-of-bounds indices). Consider updating mesh topology by restarting the Cync Lights integration.")
+
 
     async def _update_connected_devices(self):
         while not self.shutting_down:
