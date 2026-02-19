@@ -147,80 +147,107 @@ class CyncHub:
                             _LOGGER.debug(f"Sending acknowledgement for switch {switch_id}, response_id={response_id}")
                             self.loop.call_soon_threadsafe(self.send_request, response_packet)
                             if packet_length >= 33 and int(packet[13]) == 219:
-                                deviceID = self.home_devices[home_id][int(packet[21])]
-                                state = int(packet[27]) > 0
-                                brightness = int(packet[28]) if state else 0
-                                _LOGGER.debug(f"Device update (type 219): deviceID={deviceID}, state={state}, brightness={brightness}")
-                                if deviceID in self.cync_switches:
-                                    self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
+                                device_idx = int(packet[21])
+                                if device_idx < len(self.home_devices[home_id]):
+                                    deviceID = self.home_devices[home_id][device_idx]
+                                    state = int(packet[27]) > 0
+                                    brightness = int(packet[28]) if state else 0
+                                    _LOGGER.debug(f"Device update (type 219): deviceID={deviceID}, state={state}, brightness={brightness}")
+                                    if deviceID in self.cync_switches:
+                                        self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
+                                else:
+                                    _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
                             elif packet_length >= 25 and int(packet[13]) == 84:
-                                deviceID = self.home_devices[home_id][int(packet[16])]
-                                motion = int(packet[22]) > 0
-                                ambient_light = int(packet[24]) > 0
-                                _LOGGER.debug(f"Sensor update (type 84): deviceID={deviceID}, motion={motion}, ambient_light={ambient_light}")
-                                if deviceID in self.cync_motion_sensors:
-                                    self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
-                                if deviceID in self.cync_ambient_light_sensors:
-                                    self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
+                                device_idx = int(packet[16])
+                                if device_idx < len(self.home_devices[home_id]):
+                                    deviceID = self.home_devices[home_id][device_idx]
+                                    motion = int(packet[22]) > 0
+                                    ambient_light = int(packet[24]) > 0
+                                    _LOGGER.debug(f"Sensor update (type 84): deviceID={deviceID}, motion={motion}, ambient_light={ambient_light}")
+                                    if deviceID in self.cync_motion_sensors:
+                                        self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
+                                    if deviceID in self.cync_ambient_light_sensors:
+                                        self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
+                                else:
+                                    _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
                             elif packet_length > 51 and int(packet[13]) == 82:
                                 switch_id = str(struct.unpack(">I", packet[0:4])[0])
                                 home_id = self.switchID_to_homeID[switch_id]
                                 self._add_connected_devices(switch_id, home_id)
                                 packet = packet[22:]
                                 while len(packet) > 24:
-                                    deviceID = self.home_devices[home_id][int(packet[0])]
-                                    if deviceID in self.cync_switches:
-                                        if self.cync_switches[deviceID].elements > 1:
-                                            for i in range(self.cync_switches[deviceID].elements):
-                                                device_id = self.home_devices[home_id][(i + 1) * 256 + int(packet[0])]
-                                                state = int((int(packet[12]) >> i) & int(packet[8])) > 0
-                                                brightness = 100 if state else 0
-                                                self.cync_switches[device_id].update_switch(state, brightness, self.cync_switches[device_id].color_temp, self.cync_switches[device_id].rgb)
-                                        else:
-                                            state = int(packet[8]) > 0
-                                            brightness = int(packet[12]) if state else 0
-                                            color_temp = int(packet[16])
-                                            rgb = {'r': int(packet[20]), 'g': int(packet[21]), 'b': int(packet[22]), 'active': int(packet[16]) == 254}
-                                            self.cync_switches[deviceID].update_switch(state, brightness, color_temp, rgb)
+                                    device_idx = int(packet[0])
+                                    if device_idx < len(self.home_devices[home_id]):
+                                        deviceID = self.home_devices[home_id][device_idx]
+                                        if deviceID in self.cync_switches:
+                                            if self.cync_switches[deviceID].elements > 1:
+                                                for i in range(self.cync_switches[deviceID].elements):
+                                                    multi_idx = (i + 1) * 256 + device_idx
+                                                    if multi_idx < len(self.home_devices[home_id]):
+                                                        device_id = self.home_devices[home_id][multi_idx]
+                                                        state = int((int(packet[12]) >> i) & int(packet[8])) > 0
+                                                        brightness = 100 if state else 0
+                                                        self.cync_switches[device_id].update_switch(state, brightness, self.cync_switches[device_id].color_temp, self.cync_switches[device_id].rgb)
+                                            else:
+                                                state = int(packet[8]) > 0
+                                                brightness = int(packet[12]) if state else 0
+                                                color_temp = int(packet[16])
+                                                rgb = {'r': int(packet[20]), 'g': int(packet[21]), 'b': int(packet[22]), 'active': int(packet[16]) == 254}
+                                                self.cync_switches[deviceID].update_switch(state, brightness, color_temp, rgb)
                                     packet = packet[24:]
                         elif packet_type == 131:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
                             home_id = self.switchID_to_homeID[switch_id]
                             _LOGGER.debug(f"Received packet type 131 from switch {switch_id}")
                             if packet_length >= 33 and int(packet[13]) == 219:
-                                deviceID = self.home_devices[home_id][int(packet[21])]
-                                state = int(packet[27]) > 0
-                                brightness = int(packet[28]) if state else 0
-                                if deviceID in self.cync_switches:
-                                    self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
+                                device_idx = int(packet[21])
+                                if device_idx < len(self.home_devices[home_id]):
+                                    deviceID = self.home_devices[home_id][device_idx]
+                                    state = int(packet[27]) > 0
+                                    brightness = int(packet[28]) if state else 0
+                                    if deviceID in self.cync_switches:
+                                        self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
+                                else:
+                                    _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
                             elif packet_length >= 25 and int(packet[13]) == 84:
-                                deviceID = self.home_devices[home_id][int(packet[16])]
-                                motion = int(packet[22]) > 0
-                                ambient_light = int(packet[24]) > 0
-                                if deviceID in self.cync_motion_sensors:
-                                    self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
-                                if deviceID in self.cync_ambient_light_sensors:
-                                    self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
+                                device_idx = int(packet[16])
+                                if device_idx < len(self.home_devices[home_id]):
+                                    deviceID = self.home_devices[home_id][device_idx]
+                                    motion = int(packet[22]) > 0
+                                    ambient_light = int(packet[24]) > 0
+                                    if deviceID in self.cync_motion_sensors:
+                                        self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
+                                    if deviceID in self.cync_ambient_light_sensors:
+                                        self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
+                                else:
+                                    _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
                         elif packet_type == 67 and packet_length >= 26 and int(packet[4]) == 1 and int(packet[5]) == 1 and int(packet[6]) == 6:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
                             home_id = self.switchID_to_homeID[switch_id]
                             packet = packet[7:]
                             while len(packet) >= 19:
-                                if int(packet[3]) < len(self.home_devices[home_id]):
-                                    deviceID = self.home_devices[home_id][int(packet[3])]
+                                device_idx = int(packet[3])
+                                if device_idx < len(self.home_devices[home_id]):
+                                    deviceID = self.home_devices[home_id][device_idx]
                                     if deviceID in self.cync_switches:
                                         if self.cync_switches[deviceID].elements > 1:
                                             for i in range(self.cync_switches[deviceID].elements):
-                                                device_id = self.home_devices[home_id][(i + 1) * 256 + int(packet[3])]
-                                                state = int((int(packet[5]) >> i) & int(packet[4])) > 0
-                                                brightness = 100 if state else 0
-                                                self.cync_switches[device_id].update_switch(state, brightness, self.cync_switches[device_id].color_temp, self.cync_switches[device_id].rgb)
+                                                multi_idx = (i + 1) * 256 + device_idx
+                                                if multi_idx < len(self.home_devices[home_id]):
+                                                    device_id = self.home_devices[home_id][multi_idx]
+                                                    state = int((int(packet[5]) >> i) & int(packet[4])) > 0
+                                                    brightness = 100 if state else 0
+                                                    self.cync_switches[device_id].update_switch(state, brightness, self.cync_switches[device_id].color_temp, self.cync_switches[device_id].rgb)
+                                                else:
+                                                    _LOGGER.warning(f"Multi-element device index {multi_idx} out of range for home {home_id}")
                                         else:
                                             state = int(packet[4]) > 0
                                             brightness = int(packet[5]) if state else 0
                                             color_temp = int(packet[6])
                                             rgb = {'r': int(packet[7]), 'g': int(packet[8]), 'b': int(packet[9]), 'active': int(packet[6]) == 254}
                                             self.cync_switches[deviceID].update_switch(state, brightness, color_temp, rgb)
+                                else:
+                                    _LOGGER.warning(f"Device index {device_idx} out of range for home {home_id} (max: {len(self.home_devices[home_id])-1})")
                                 packet = packet[19:]
                         elif packet_type == 171:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
