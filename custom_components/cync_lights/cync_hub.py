@@ -65,6 +65,7 @@ class CyncHub:
         self.loop.run_until_complete(self._connect())
 
     def disconnect(self):
+        _LOGGER.info("Disconnecting Cync hub client")
         self.shutting_down = True
         for home_controllers in self.home_controllers.values():
             for controller in home_controllers:
@@ -75,20 +76,27 @@ class CyncHub:
     async def _connect(self):
         while not self.shutting_down:
             try:
+                _LOGGER.info("Attempting to connect to Cync server (cm.gelighting.com:23779)...")
                 context = ssl.create_default_context()
                 try:
                     self.reader, self.writer = await asyncio.open_connection('cm.gelighting.com', 23779, ssl=context)
+                    _LOGGER.debug("Connected with SSL on port 23779")
                 except Exception as e:
+                    _LOGGER.debug(f"SSL connection on port 23779 failed: {type(e).__name__}, trying insecure SSL...")
                     context.check_hostname = False
                     context.verify_mode = ssl.CERT_NONE
                     try:
                         self.reader, self.writer = await asyncio.open_connection('cm.gelighting.com', 23779, ssl=context)
+                        _LOGGER.debug("Connected with insecure SSL on port 23779")
                     except Exception as e:
+                        _LOGGER.debug(f"Insecure SSL connection on port 23779 failed: {type(e).__name__}, trying port 23778...")
                         self.reader, self.writer = await asyncio.open_connection('cm.gelighting.com', 23778)
+                        _LOGGER.debug("Connected without SSL on port 23778")
             except Exception as e:
-                _LOGGER.error(str(type(e).__name__) + ": " + str(e))
+                _LOGGER.error(f"Connection to Cync server failed: {type(e).__name__}: {str(e)}. Retrying in 5 seconds...")
                 await asyncio.sleep(5)
             else:
+                _LOGGER.info("Successfully connected to Cync server")
                 read_tcp_messages = asyncio.create_task(self._read_tcp_messages(), name="Read TCP Messages")
                 maintain_connection = asyncio.create_task(self._maintain_connection(), name="Maintain Connection")
                 update_state = asyncio.create_task(self._update_state(), name="Update State")
@@ -109,7 +117,7 @@ class CyncHub:
                         _LOGGER.error("Connection to Cync server reset, restarting in 15 seconds")
                         await asyncio.sleep(15)
                     else:
-                        _LOGGER.debug("Cync client shutting down")
+                        _LOGGER.info("Cync client shutting down")
                 except Exception as e:
                     _LOGGER.error(str(type(e).__name__) + ": " + str(e))
 
@@ -118,6 +126,7 @@ class CyncHub:
         await self.writer.drain()
         await self.reader.read(1000)
         self.logged_in = True
+        _LOGGER.info("Cync hub connected and logged in successfully")
         while not self.shutting_down:
             data = await self.reader.read(1000)
             if len(data) == 0:
@@ -129,22 +138,26 @@ class CyncHub:
                 packet = data[5:packet_length + 5]
                 try:
                     if packet_length == len(packet):
+                        _LOGGER.debug(f"Received packet type={packet_type}, length={packet_length}")
                         if packet_type == 115:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
                             home_id = self.switchID_to_homeID[switch_id]
                             response_id = struct.unpack(">H", packet[4:6])[0]
                             response_packet = bytes.fromhex('7300000007') + int(switch_id).to_bytes(4, 'big') + response_id.to_bytes(2, 'big') + bytes.fromhex('00')
+                            _LOGGER.debug(f"Sending acknowledgement for switch {switch_id}, response_id={response_id}")
                             self.loop.call_soon_threadsafe(self.send_request, response_packet)
                             if packet_length >= 33 and int(packet[13]) == 219:
                                 deviceID = self.home_devices[home_id][int(packet[21])]
                                 state = int(packet[27]) > 0
                                 brightness = int(packet[28]) if state else 0
+                                _LOGGER.debug(f"Device update (type 219): deviceID={deviceID}, state={state}, brightness={brightness}")
                                 if deviceID in self.cync_switches:
                                     self.cync_switches[deviceID].update_switch(state, brightness, self.cync_switches[deviceID].color_temp, self.cync_switches[deviceID].rgb)
                             elif packet_length >= 25 and int(packet[13]) == 84:
                                 deviceID = self.home_devices[home_id][int(packet[16])]
                                 motion = int(packet[22]) > 0
                                 ambient_light = int(packet[24]) > 0
+                                _LOGGER.debug(f"Sensor update (type 84): deviceID={deviceID}, motion={motion}, ambient_light={ambient_light}")
                                 if deviceID in self.cync_motion_sensors:
                                     self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
                                 if deviceID in self.cync_ambient_light_sensors:
@@ -173,6 +186,7 @@ class CyncHub:
                         elif packet_type == 131:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
                             home_id = self.switchID_to_homeID[switch_id]
+                            _LOGGER.debug(f"Received packet type 131 from switch {switch_id}")
                             if packet_length >= 33 and int(packet[13]) == 219:
                                 deviceID = self.home_devices[home_id][int(packet[21])]
                                 state = int(packet[27]) > 0
@@ -215,8 +229,12 @@ class CyncHub:
                         elif packet_type == 123:
                             seq = str(struct.unpack(">H", packet[4:6])[0])
                             command_received = self.pending_commands.get(seq, None)
+                            _LOGGER.debug(f"Command acknowledgement received: seq={seq}")
                             if command_received is not None:
+                                _LOGGER.debug(f"Executing callback for seq={seq}")
                                 command_received(seq)
+                            else:
+                                _LOGGER.warning(f"No pending command found for seq={seq}")
                 except Exception as e:
                     _LOGGER.error(str(type(e).__name__) + ": " + str(e))
                 data = data[packet_length + 5:]
@@ -225,6 +243,7 @@ class CyncHub:
     async def _maintain_connection(self):
         while not self.shutting_down:
             await asyncio.sleep(20)
+            _LOGGER.debug("Sending keep-alive message to Cync server")
             self.writer.write(bytes.fromhex('d300000000'))
             await self.writer.drain()
         raise ShuttingDown
@@ -233,6 +252,7 @@ class CyncHub:
         for dev in self.switchID_to_deviceIDs[switch_id]:
             if dev not in self.connected_devices[home_id]:
                 self.connected_devices[home_id].append(dev)
+                _LOGGER.debug(f"Controller {switch_id} connected with device {dev}")
                 if self.connected_devices_updated:
                     for dev in self.cync_switches.values():
                         dev.update_controllers()
@@ -246,6 +266,7 @@ class CyncHub:
                 devices.clear()
             while not self.logged_in:
                 await asyncio.sleep(2)
+            _LOGGER.info("Discovering connected Cync controllers...")
             attempts = 0
             while True in [len(devices) < len(self.home_controllers[home_id]) * 0.5 for home_id, devices in self.connected_devices.items()] and attempts < 10:
                 for home_id, home_controllers in self.home_controllers.items():
@@ -256,6 +277,7 @@ class CyncHub:
                         await asyncio.sleep(0.15)
                 await asyncio.sleep(2)
                 attempts += 1
+            _LOGGER.info(f"Controller discovery complete. Connected devices per home: {dict((k, len(v)) for k, v in self.connected_devices.items())}")
             for dev in self.cync_switches.values():
                 dev.update_controllers()
             for room in self.cync_rooms.values():
@@ -288,21 +310,26 @@ class CyncHub:
 
     def combo_control(self, state, brightness, color_tone, rgb, switch_id, mesh_id, seq):
         combo_request = bytes.fromhex('7300000022') + int(switch_id).to_bytes(4, 'big') + int(seq).to_bytes(2, 'big') + bytes.fromhex('007e00000000f8f010000000000000') + mesh_id + bytes.fromhex('f00000') + (1 if state else 0).to_bytes(1, 'big') + brightness.to_bytes(1, 'big') + color_tone.to_bytes(1, 'big') + rgb[0].to_bytes(1, 'big') + rgb[1].to_bytes(1, 'big') + rgb[2].to_bytes(1, 'big') + ((496 + int(mesh_id[0]) + int(mesh_id[1]) + (1 if state else 0) + brightness + color_tone + sum(rgb)) % 256).to_bytes(1, 'big') + bytes.fromhex('7e')
+        _LOGGER.debug(f"Sending combo_control: switch_id={switch_id}, state={state}, brightness={brightness}, color_tone={color_tone}, rgb={rgb}, seq={seq}")
         self.loop.call_soon_threadsafe(self.send_request, combo_request)
 
     def turn_on(self, switch_id, mesh_id, seq):
         power_request = bytes.fromhex('730000001f') + int(switch_id).to_bytes(4, 'big') + seq.to_bytes(2, 'big') + bytes.fromhex('007e00000000f8d00d000000000000') + mesh_id + bytes.fromhex('d00000010000') + ((430 + int(mesh_id[0]) + int(mesh_id[1])) % 256).to_bytes(1, 'big') + bytes.fromhex('7e')
+        _LOGGER.debug(f"Sending turn_on: switch_id={switch_id}, seq={seq}")
         self.loop.call_soon_threadsafe(self.send_request, power_request)
 
     def turn_off(self, switch_id, mesh_id, seq):
         power_request = bytes.fromhex('730000001f') + int(switch_id).to_bytes(4, 'big') + seq.to_bytes(2, 'big') + bytes.fromhex('007e00000000f8d00d000000000000') + mesh_id + bytes.fromhex('d00000000000') + ((429 + int(mesh_id[0]) + int(mesh_id[1])) % 256).to_bytes(1, 'big') + bytes.fromhex('7e')
+        _LOGGER.debug(f"Sending turn_off: switch_id={switch_id}, seq={seq}")
         self.loop.call_soon_threadsafe(self.send_request, power_request)
 
     def set_color_temp(self, color_temp, switch_id, mesh_id, seq):
         if color_temp is None:
+            _LOGGER.debug(f"set_color_temp called with None, skipping")
             return
         color_temp = round(max(0, min(100, color_temp)))  # Ensure color_temp is 0-100
         color_temp_request = bytes.fromhex('730000001e') + int(switch_id).to_bytes(4, 'big') + int(seq).to_bytes(2, 'big') + bytes.fromhex('007e00000000f8e20c000000000000') + mesh_id + bytes.fromhex('e2000005') + color_temp.to_bytes(1, 'big') + ((469 + int(mesh_id[0]) + int(mesh_id[1]) + color_temp) % 256).to_bytes(1, 'big') + bytes.fromhex('7e')
+        _LOGGER.debug(f"Sending set_color_temp: switch_id={switch_id}, color_temp={color_temp}, seq={seq}")
         self.loop.call_soon_threadsafe(self.send_request, color_temp_request)
 
     def get_seq_num(self):
@@ -380,6 +407,7 @@ class CyncRoom:
         """Turn on the light with support for updating multiple attributes atomically."""
         attempts = 0
         update_received = False
+        _LOGGER.info(f"Room {self.name} (room_id={self.room_id}) turn_on requested: brightness={attr_br}, color_temp={attr_ct}, rgb={attr_rgb}")
         while not update_received and attempts < int(self._command_retry_time / self._command_timout):
             seq = self.hub.get_seq_num()
             if len(self.controllers) > 0:
@@ -417,33 +445,40 @@ class CyncRoom:
                 final_rgb = [255, 255, 255]
 
             # Always use combo_control for atomic updates
+            _LOGGER.debug(f"Room {self.name} sending turn_on command (attempt {attempts+1}/{int(self._command_retry_time / self._command_timout)}): controller={controller}, final_brightness={final_brightness}, color_temp={final_color_temp}, seq={seq}")
             self.hub.combo_control(True, final_brightness, final_color_temp, final_rgb, controller, self.mesh_id, seq)
             self.hub.pending_commands[str(seq)] = self.command_received
             await asyncio.sleep(self._command_timout)
             if self.hub.pending_commands.get(str(seq), None) is not None:
                 self.hub.pending_commands.pop(str(seq))
                 attempts += 1
+                _LOGGER.debug(f"Room {self.name} turn_on command attempt {attempts} did not receive acknowledgement, retrying...")
             else:
                 update_received = True
+                _LOGGER.debug(f"Room {self.name} turn_on command received acknowledgement")
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
         attempts = 0
         update_received = False
+        _LOGGER.info(f"Room {self.name} (room_id={self.room_id}) turn_off requested")
         while not update_received and attempts < int(self._command_retry_time / self._command_timout):
             seq = self.hub.get_seq_num()
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts % len(self.controllers)]
             else:
                 controller = self.default_controller
+            _LOGGER.debug(f"Room {self.name} sending turn_off command (attempt {attempts+1}/{int(self._command_retry_time / self._command_timout)}): controller={controller}, seq={seq}")
             self.hub.turn_off(controller, self.mesh_id, seq)
             self.hub.pending_commands[str(seq)] = self.command_received
             await asyncio.sleep(self._command_timout)
             if self.hub.pending_commands.get(str(seq), None) is not None:
                 self.hub.pending_commands.pop(str(seq))
                 attempts += 1
+                _LOGGER.debug(f"Room {self.name} turn_off command attempt {attempts} did not receive acknowledgement, retrying...")
             else:
                 update_received = True
+                _LOGGER.debug(f"Room {self.name} turn_off command received acknowledgement")
 
     def command_received(self, seq):
         """Remove command from hub.pending_commands when a reply is received from Cync server"""
@@ -469,10 +504,12 @@ class CyncRoom:
             _rgb['active'] = True in ([self.hub.cync_switches[device_id].rgb['active'] for device_id in self.switches_support_rgb] + [self.hub.cync_rooms[room_id].rgb['active'] for room_id in self.groups_support_rgb])
         
         if _power_state != self.power_state or _brightness != self.brightness or _color_temp != self.color_temp or _rgb != self.rgb:
+            old_state = (self.power_state, self.brightness, self.color_temp, self.rgb)
             self.power_state = _power_state
             self.brightness = _brightness
             self.color_temp = _color_temp
             self.rgb = _rgb
+            _LOGGER.debug(f"Room {self.name} state updated: {old_state} -> ({self.power_state}, {self.brightness}, {self.color_temp}, {self.rgb})")
             self.publish_update()
             if self._update_parent_room:
                 self._update_parent_room()
@@ -488,8 +525,10 @@ class CyncRoom:
                 if controller in others_available:
                     others_available.remove(controller)
             self.controllers = controllers + others_available
+            _LOGGER.debug(f"Room {self.name} updated controllers: {self.controllers}")
         else:
             self.controllers = [self.default_controller]
+            _LOGGER.debug(f"Room {self.name} no connected devices, using default controller: {self.default_controller}")
 
     def publish_update(self):
         if self._update_callback:
@@ -537,6 +576,7 @@ class CyncSwitch:
         """Turn on the light with support for updating multiple attributes atomically."""
         attempts = 0
         update_received = False
+        _LOGGER.info(f"Switch {self.name} (device_id={self.device_id}) turn_on requested: brightness={attr_br}, color_temp={attr_ct}, rgb={attr_rgb}")
         while not update_received and attempts < int(self._command_retry_time / self._command_timout):
             seq = self.hub.get_seq_num()
             if len(self.controllers) > 0:
@@ -574,33 +614,40 @@ class CyncSwitch:
                 final_rgb = [255, 255, 255]
 
             # Always use combo_control for atomic updates
+            _LOGGER.debug(f"Switch {self.name} sending turn_on command (attempt {attempts+1}/{int(self._command_retry_time / self._command_timout)}): controller={controller}, final_brightness={final_brightness}, color_temp={final_color_temp}, seq={seq}")
             self.hub.combo_control(True, final_brightness, final_color_temp, final_rgb, controller, self.mesh_id, seq)
             self.hub.pending_commands[str(seq)] = self.command_received
             await asyncio.sleep(self._command_timout)
             if self.hub.pending_commands.get(str(seq), None) is not None:
                 self.hub.pending_commands.pop(str(seq))
                 attempts += 1
+                _LOGGER.debug(f"Switch {self.name} turn_on command attempt {attempts} did not receive acknowledgement, retrying...")
             else:
                 update_received = True
+                _LOGGER.debug(f"Switch {self.name} turn_on command received acknowledgement")
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
         attempts = 0
         update_received = False
+        _LOGGER.info(f"Switch {self.name} (device_id={self.device_id}) turn_off requested")
         while not update_received and attempts < int(self._command_retry_time / self._command_timout):
             seq = self.hub.get_seq_num()
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts % len(self.controllers)]
             else:
                 controller = self.default_controller
+            _LOGGER.debug(f"Switch {self.name} sending turn_off command (attempt {attempts+1}/{int(self._command_retry_time / self._command_timout)}): controller={controller}, seq={seq}")
             self.hub.turn_off(controller, self.mesh_id, seq)
             self.hub.pending_commands[str(seq)] = self.command_received
             await asyncio.sleep(self._command_timout)
             if self.hub.pending_commands.get(str(seq), None) is not None:
                 self.hub.pending_commands.pop(str(seq))
                 attempts += 1
+                _LOGGER.debug(f"Switch {self.name} turn_off command attempt {attempts} did not receive acknowledgement, retrying...")
             else:
                 update_received = True
+                _LOGGER.debug(f"Switch {self.name} turn_off command received acknowledgement")
 
     def command_received(self, seq):
         """Remove command from hub.pending_commands when a reply is received from Cync server"""
@@ -611,10 +658,12 @@ class CyncSwitch:
         """Update the state of the switch as updates are received from the Cync server"""
         self.update_received = True
         if self.power_state != state or self.brightness != brightness or self.color_temp != color_temp or self.rgb != rgb:
+            old_state = (self.power_state, self.brightness, self.color_temp, self.rgb)
             self.power_state = state
             self.brightness = brightness if self.support_brightness and state else 100 if state else 0
             self.color_temp = color_temp
             self.rgb = rgb
+            _LOGGER.debug(f"Switch {self.name} state updated: {old_state} -> ({self.power_state}, {self.brightness}, {self.color_temp}, {self.rgb})")
             self.publish_update()
             if self._update_parent_room:
                 self._update_parent_room()
@@ -634,8 +683,10 @@ class CyncSwitch:
                 if controller in others_available:
                     others_available.remove(controller)
             self.controllers = controllers + others_available
+            _LOGGER.debug(f"Switch {self.name} updated controllers: {self.controllers}")
         else:
             self.controllers = [self.default_controller]
+            _LOGGER.debug(f"Switch {self.name} no connected devices, using default controller: {self.default_controller}")
 
     def publish_update(self):
         if self._update_callback:
@@ -659,8 +710,10 @@ class CyncMotionSensor:
         self._update_callback = None
 
     def update_motion_sensor(self, motion):
-        self.motion = motion
-        self.publish_update()
+        if self.motion != motion:
+            _LOGGER.debug(f"Motion sensor {self.name} motion state changed: {self.motion} -> {motion}")
+            self.motion = motion
+            self.publish_update()
 
     def publish_update(self):
         if self._update_callback:
@@ -684,8 +737,10 @@ class CyncAmbientLightSensor:
         self._update_callback = None
 
     def update_ambient_light_sensor(self, ambient_light):
-        self.ambient_light = ambient_light
-        self.publish_update()
+        if self.ambient_light != ambient_light:
+            _LOGGER.debug(f"Ambient light sensor {self.name} ambient light state changed: {self.ambient_light} -> {ambient_light}")
+            self.ambient_light = ambient_light
+            self.publish_update()
 
     def publish_update(self):
         if self._update_callback:
