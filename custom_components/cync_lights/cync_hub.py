@@ -50,6 +50,7 @@ class CyncHub:
         self.connected_devices_updated = False
         self.options = options
         self._seq_num = 0
+        self._seq_num_lock = threading.Lock()
         self.pending_commands = {}
         [room.initialize() for room in self.cync_rooms.values() if room.is_subgroup]
         [room.initialize() for room in self.cync_rooms.values() if not room.is_subgroup]
@@ -223,7 +224,7 @@ class CyncHub:
 
     async def _maintain_connection(self):
         while not self.shutting_down:
-            await asyncio.sleep(180)
+            await asyncio.sleep(20)
             self.writer.write(bytes.fromhex('d300000000'))
             await self.writer.drain()
         raise ShuttingDown
@@ -305,11 +306,12 @@ class CyncHub:
         self.loop.call_soon_threadsafe(self.send_request, color_temp_request)
 
     def get_seq_num(self):
-        if self._seq_num == 65535:
-            self._seq_num = 1
-        else:
-            self._seq_num += 1
-        return self._seq_num
+        with self._seq_num_lock:
+            if self._seq_num == 65535:
+                self._seq_num = 1
+            else:
+                self._seq_num += 1
+            return self._seq_num
 
 class CyncRoom:
     def __init__(self, room_id, room_info, hub):
@@ -375,7 +377,7 @@ class CyncRoom:
         self._update_parent_room = parent_updater
 
     async def turn_on(self, attr_rgb, attr_br, attr_ct) -> None:
-        """Turn on the light."""
+        """Turn on the light with support for updating multiple attributes atomically."""
         attempts = 0
         update_received = False
         while not update_received and attempts < int(self._command_retry_time / self._command_timout):
@@ -384,19 +386,38 @@ class CyncRoom:
                 controller = self.controllers[attempts % len(self.controllers)]
             else:
                 controller = self.default_controller
-            if attr_rgb is not None and attr_br is not None:
-                if math.isclose(attr_br, max([self.rgb['r'], self.rgb['g'], self.rgb['b']]) * self.brightness / 100, abs_tol=2):
-                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
-                else:
-                    self.hub.combo_control(True, round(attr_br * 100 / 255), 255, [255, 255, 255], controller, self.mesh_id, seq)
-            elif attr_rgb is None and attr_ct is None and attr_br is not None:
-                self.hub.combo_control(True, round(attr_br * 100 / 255), 255, [255, 255, 255], controller, self.mesh_id, seq)
-            elif attr_rgb is not None and attr_br is None:
-                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
-            elif attr_ct is not None:
-                self.hub.set_color_temp(attr_ct, controller, self.mesh_id, seq)
+
+            # Determine final brightness: use provided value or current state
+            if attr_br is not None:
+                final_brightness = round(attr_br * 100 / 255)
             else:
-                self.hub.turn_on(controller, self.mesh_id, seq)
+                final_brightness = self.brightness
+
+            # Determine final color temperature: use provided value or current state
+            if attr_ct is not None:
+                final_color_temp = attr_ct
+            else:
+                final_color_temp = self.color_temp
+
+            # Determine final RGB and color mode
+            if attr_rgb is not None:
+                final_rgb = attr_rgb
+                # If brightness is also provided, check if it matches RGB values
+                if attr_br is not None:
+                    if math.isclose(attr_br, max([attr_rgb[0], attr_rgb[1], attr_rgb[2]]) * final_brightness / 100, abs_tol=2):
+                        final_color_temp = 254  # RGB mode
+                    else:
+                        final_color_temp = 255  # White mode with brightness
+                        final_rgb = [255, 255, 255]
+                else:
+                    # RGB without brightness change: use current brightness
+                    final_color_temp = 254  # RGB mode
+            else:
+                # No RGB specified: use current or default to white
+                final_rgb = [255, 255, 255]
+
+            # Always use combo_control for atomic updates
+            self.hub.combo_control(True, final_brightness, final_color_temp, final_rgb, controller, self.mesh_id, seq)
             self.hub.pending_commands[str(seq)] = self.command_received
             await asyncio.sleep(self._command_timout)
             if self.hub.pending_commands.get(str(seq), None) is not None:
@@ -513,7 +534,7 @@ class CyncSwitch:
         self._update_parent_room = parent_updater
 
     async def turn_on(self, attr_rgb, attr_br, attr_ct) -> None:
-        """Turn on the light."""
+        """Turn on the light with support for updating multiple attributes atomically."""
         attempts = 0
         update_received = False
         while not update_received and attempts < int(self._command_retry_time / self._command_timout):
@@ -522,19 +543,38 @@ class CyncSwitch:
                 controller = self.controllers[attempts % len(self.controllers)]
             else:
                 controller = self.default_controller
-            if attr_rgb is not None and attr_br is not None:
-                if math.isclose(attr_br, max([self.rgb['r'], self.rgb['g'], self.rgb['b']]) * self.brightness / 100, abs_tol=2):
-                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
-                else:
-                    self.hub.combo_control(True, round(attr_br * 100 / 255), 255, [255, 255, 255], controller, self.mesh_id, seq)
-            elif attr_rgb is None and attr_ct is None and attr_br is not None:
-                self.hub.combo_control(True, round(attr_br * 100 / 255), 255, [255, 255, 255], controller, self.mesh_id, seq)
-            elif attr_rgb is not None and attr_br is None:
-                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
-            elif attr_ct is not None:
-                self.hub.set_color_temp(attr_ct, controller, self.mesh_id, seq)
+
+            # Determine final brightness: use provided value or current state
+            if attr_br is not None:
+                final_brightness = round(attr_br * 100 / 255)
             else:
-                self.hub.turn_on(controller, self.mesh_id, seq)
+                final_brightness = self.brightness
+
+            # Determine final color temperature: use provided value or current state
+            if attr_ct is not None:
+                final_color_temp = attr_ct
+            else:
+                final_color_temp = self.color_temp
+
+            # Determine final RGB and color mode
+            if attr_rgb is not None:
+                final_rgb = attr_rgb
+                # If brightness is also provided, check if it matches RGB values
+                if attr_br is not None:
+                    if math.isclose(attr_br, max([attr_rgb[0], attr_rgb[1], attr_rgb[2]]) * final_brightness / 100, abs_tol=2):
+                        final_color_temp = 254  # RGB mode
+                    else:
+                        final_color_temp = 255  # White mode with brightness
+                        final_rgb = [255, 255, 255]
+                else:
+                    # RGB without brightness change: use current brightness
+                    final_color_temp = 254  # RGB mode
+            else:
+                # No RGB specified: use current or default to white
+                final_rgb = [255, 255, 255]
+
+            # Always use combo_control for atomic updates
+            self.hub.combo_control(True, final_brightness, final_color_temp, final_rgb, controller, self.mesh_id, seq)
             self.hub.pending_commands[str(seq)] = self.command_received
             await asyncio.sleep(self._command_timout)
             if self.hub.pending_commands.get(str(seq), None) is not None:
